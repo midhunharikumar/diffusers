@@ -205,6 +205,8 @@ class Attention(nn.Module):
                 AttnProcessor2_0() if hasattr(F, "scaled_dot_product_attention") and self.scale_qk else AttnProcessor()
             )
         self.set_processor(processor)
+        self.store_activations = None
+        self.activation_store = None
 
     def set_use_memory_efficient_attention_xformers(
         self, use_memory_efficient_attention_xformers: bool, attention_op: Optional[Callable] = None
@@ -519,13 +521,25 @@ class Attention(nn.Module):
         # The `Attention` class can call different attention processors / attention functions
         # here we simply pass along all tensors to the selected processor class
         # For standard processors that are defined here, `**cross_attention_kwargs` is empty
-        return self.processor(
-            self,
-            hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            attention_mask=attention_mask,
-            **cross_attention_kwargs,
-        )
+        if self.store_activations is None:
+            return self.processor(
+                self,
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=attention_mask,
+                **cross_attention_kwargs,
+            )
+        elif self.store_activations == 'store':
+            hidden_states, attention_act = self.processor(
+                self,
+                hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=attention_mask,
+                return_attention_act=True,
+                **cross_attention_kwargs,
+            )
+            self.activation_store = attention_act.detach()
+        return hidden_states
 
     def batch_to_head_dim(self, tensor: torch.Tensor) -> torch.Tensor:
         r"""
@@ -1173,6 +1187,7 @@ class AttnProcessor2_0:
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         temb: Optional[torch.FloatTensor] = None,
+        return_attention_act :Optional[bool] = False,
         scale: float = 1.0,
     ) -> torch.FloatTensor:
         residual = hidden_states
@@ -1213,6 +1228,12 @@ class AttnProcessor2_0:
         value = (
             attn.to_v(encoder_hidden_states, scale=scale) if not USE_PEFT_BACKEND else attn.to_v(encoder_hidden_states)
         )
+        print("Key",key.shape)
+        print("Value",value.shape)
+        print("Encoder",encoder_hidden_states.shape)
+        print(attn)
+        if return_attention_act:
+            return_val_attn =  [key,value]
 
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
@@ -1245,7 +1266,8 @@ class AttnProcessor2_0:
             hidden_states = hidden_states + residual
 
         hidden_states = hidden_states / attn.rescale_output_factor
-
+        if return_attention_act:
+            return hidden_states, return_val_attn
         return hidden_states
 
 
